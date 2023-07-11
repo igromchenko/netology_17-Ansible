@@ -1,0 +1,14 @@
+data_dir = "/opt/vector_data"
+
+[sources.syslog]
+type = "file"
+include = [ "/var/log/messages" ]
+
+
+[sinks.clickhouse]
+type = "clickhouse"
+inputs = [ "syslog" ]
+database = "logs"
+endpoint = "http://localhost:8123"
+table = "syslog"
+skip_unknown_fields = true

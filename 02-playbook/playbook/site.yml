@@ -1,0 +1,99 @@
+---
+- name: Install Clickhouse
+  hosts: clickhouse
+  user: vagrant
+  handlers:
+    - name: Start clickhouse service
+      become: true
+      ansible.builtin.service:
+        name: clickhouse-server
+        state: restarted
+  tasks:
+    - block:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
+            dest: "./{{ item }}-{{ clickhouse_version }}.rpm"
+          with_items: "{{ clickhouse_packages }}"
+      rescue:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
+            dest: "./clickhouse-common-static-{{ clickhouse_version }}.rpm"
+    - name: Install clickhouse packages
+      become: true
+      ansible.builtin.yum:
+        name:
+          - clickhouse-common-static-{{ clickhouse_version }}.rpm
+          - clickhouse-client-{{ clickhouse_version }}.rpm
+          - clickhouse-server-{{ clickhouse_version }}.rpm
+      notify: Start clickhouse service
+    - name: Flush handlers
+      meta: flush_handlers
+    - name: Create database
+      ansible.builtin.command: "clickhouse-client -q 'create database logs;'"
+      register: create_db
+      failed_when: create_db.rc != 0 and create_db.rc !=82
+      changed_when: create_db.rc == 0
+    - name: Create table
+      ansible.builtin.command: "clickhouse-client -q 'CREATE TABLE logs.syslog (message String) ENGINE = MergeTree() ORDER BY tuple();'"
+      register: create_table
+      failed_when: create_table.rc != 0 and create_table.rc !=57
+      changed_when: create_table.rc == 0
+
+- name: Install Vector
+  hosts: clickhouse
+  user: vagrant
+  tasks:
+    - name: Add Vector group
+      become: true
+      ansible.builtin.group:
+        name: vector
+    - name: Add Vector user
+      become: true
+      ansible.builtin.user:
+        name: vector
+        group: vector
+    - name: Set syslog file readable by vector group
+      become: true
+      ansible.builtin.file:
+        path: "/var/log/messages"
+        group: vector
+        mode: "640"
+    - name: Get Vector archive
+      ansible.builtin.get_url:
+        url: "https://packages.timber.io/vector/0.31.0/vector-{{ vector_version }}-x86_64-unknown-linux-musl.tar.gz"
+        dest: "~/"
+      register: get_archive
+    - name: Unpack Vector binary
+      become: true
+      ansible.builtin.unarchive:
+        src: "/home/vagrant/vector-{{ vector_version }}-x86_64-unknown-linux-musl.tar.gz"
+        dest: "/opt/"
+        remote_src: true
+        owner: vector
+      when: get_archive.changed
+    - name: Create data-directory
+      become: true
+      ansible.builtin.file:
+        path: "/opt/vector_data"
+        state: directory
+        owner: vector
+        mode: "755"
+    - name: Upload Vector config
+      ansible.builtin.template:
+        src: "./vector.toml"
+        dest: "/opt/vector-x86_64-unknown-linux-musl/config/"
+        mode: "644"
+    - name: Upload systemd unit-file
+      become: true
+      ansible.builtin.template:
+        src: "./vector.service"
+        dest: "/usr/lib/systemd/system/"
+        mode: "644"
+    - name: Start Vector
+      become: true
+      ansible.builtin.systemd:
+        name: vector
+        state: started
+        daemon_reload: true
