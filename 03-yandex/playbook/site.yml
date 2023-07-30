@@ -1,0 +1,162 @@
+---
+- name: Install Clickhouse
+  hosts: clickhouse
+  user: centos
+  handlers:
+    - name: Start clickhouse service
+      become: true
+      ansible.builtin.service:
+        name: clickhouse-server
+        state: restarted
+  tasks:
+    - block:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
+            dest: "./{{ item }}-{{ clickhouse_version }}.rpm"
+          with_items: "{{ clickhouse_packages }}"
+      rescue:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
+            dest: "./clickhouse-common-static-{{ clickhouse_version }}.rpm"
+    - name: Install clickhouse packages
+      become: true
+      ansible.builtin.yum:
+        name:
+          - clickhouse-common-static-{{ clickhouse_version }}.rpm
+          - clickhouse-client-{{ clickhouse_version }}.rpm
+          - clickhouse-server-{{ clickhouse_version }}.rpm
+      notify: Start clickhouse service
+    - name: Upload listen_host.xml
+      become: true
+      ansible.builtin.template:
+        src: "./listen_host.xml"
+        dest: "/etc/clickhouse-server/config.d/"
+        mode: "644"
+    - name: Flush handlers
+      meta: flush_handlers
+    - name: Create database
+      ansible.builtin.command: "clickhouse-client -q 'create database logs;'"
+      register: create_db
+      failed_when: create_db.rc != 0 and create_db.rc !=82
+      changed_when: create_db.rc == 0
+    - name: Create table
+      ansible.builtin.command: "clickhouse-client -q 'CREATE TABLE logs.vector (message String) ENGINE = MergeTree() ORDER BY tuple();'"
+      register: create_table
+      failed_when: create_table.rc != 0 and create_table.rc !=57
+      changed_when: create_table.rc == 0
+
+- name: Install Vector
+  hosts: vector
+  user: centos
+  handlers:
+    - name: Restart vector service
+      become: true
+      ansible.builtin.service:
+        name: vector
+        state: restarted
+        daemon_reload: true
+  tasks:
+    - name: Add Vector group
+      become: true
+      ansible.builtin.group:
+        name: vector
+    - name: Add Vector user
+      become: true
+      ansible.builtin.user:
+        name: vector
+        group: vector
+    - name: Get Vector archive
+      become: true
+      ansible.builtin.get_url:
+        url: "https://packages.timber.io/vector/0.31.0/vector-{{ vector_version }}-x86_64-unknown-linux-musl.tar.gz"
+        dest: "/opt/"
+        owner: vector
+      register: get_archive
+    - name: Unpack Vector binary
+      become: true
+      ansible.builtin.unarchive:
+        src: "/opt/vector-{{ vector_version }}-x86_64-unknown-linux-musl.tar.gz"
+        dest: "/opt/"
+        remote_src: true
+        owner: vector
+      when: get_archive.changed
+    - name: Create data-directory
+      become: true
+      ansible.builtin.file:
+        path: "/opt/vector_data"
+        state: directory
+        owner: vector
+        mode: "755"
+    - name: Upload Vector config
+      become: true
+      ansible.builtin.template:
+        src: "./vector.toml"
+        dest: "/opt/vector-x86_64-unknown-linux-musl/config/"
+        mode: "644"
+      notify: Restart vector service
+    - name: Upload systemd unit-file
+      become: true
+      ansible.builtin.template:
+        src: "./vector.service"
+        dest: "/usr/lib/systemd/system/"
+        mode: "644"
+      notify: Restart vector service
+    - name: Start Vector
+      become: true
+      ansible.builtin.systemd:
+        name: vector
+        state: started
+        daemon_reload: true
+
+- name: Install Lighthouse
+  hosts: lighthouse
+  user: centos
+  handlers:
+    - name: Restart nginx service
+      become: true
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+  tasks:
+    - name: Install required packages
+      become: true
+      ansible.builtin.yum:
+        name: "{{ item }}"
+        state: present
+        update_cache: true
+      with_items:
+        - epel-release
+        - nginx
+        - git
+    - name: Get Lighthouse src-files from github.com
+      ansible.builtin.git:
+        repo: 'https://github.com/VKCOM/lighthouse.git'
+        dest: lighthouse
+        version: 'master'
+      register: get_src
+      notify: Restart nginx service
+    - name: Copy Lighthouse src-files to Nginx directory
+      become: true
+      ansible.builtin.copy:
+        src: lighthouse/
+        dest: /usr/share/nginx/html
+        mode: u=rwX,g=rX,o=rX
+        remote_src: true
+      when: get_src.changed
+    - name: Set Clickhouse URL as default hash for Lighthouse
+      become: true
+      ansible.builtin.replace:
+        path: /usr/share/nginx/html/app.js
+        regexp: "db_host = prompt\\('Host:', 'http:\/\/127.0.0.1:8123\/'\\);"
+        replace: "db_host = 'http://{{ hostvars['clickhouse'].ansible_host }}:8123/';"
+      notify: Restart nginx service
+    - name: Start nginx service
+      become: true
+      ansible.builtin.service:
+        name: nginx
+        state: started
+    - name: Print Lighthouse URL
+      debug:
+        msg: "Lighthouse is available via http://{{ hostvars['lighthouse'].ansible_host }}"
