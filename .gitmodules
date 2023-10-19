@@ -1,3 +1,6 @@
 [submodule "04-role/playbook"]
 	path = 04-role/playbook
 	url = https://github.com/igromchenko/playbook.git
+[submodule "05-testing/vector-role"]
+	path = 05-testing/vector-role
+	url = https://github.com/igromchenko/vector-role.git
